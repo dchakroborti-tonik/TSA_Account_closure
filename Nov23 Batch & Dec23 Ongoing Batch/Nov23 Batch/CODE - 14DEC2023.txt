@@ -1,0 +1,73 @@
+with
+w_kyc
+as
+(
+  select distinct PARTYID, SEGCATEGORYDESC, row_number() over(partition by partyid order by SEGEFFECTIVEFROM desc) as rnk from `core_raw.party_details`
+),
+w_tsa
+as
+(
+  select * from risk_credit_mis.tsa_account_closure where Run_Date = date '2023-12-13'
+  and
+  cast(Customer_Id as int64) in
+  (
+    select partyid from  dap_ds_poweruser_playground.tsa_closure_Nov_2nd_notification_base
+  )
+),
+w_approved
+as
+(
+  select DISTINCT customerId from risk_credit_mis.loan_master_table where loantype = 'BIGLOAN' OR FLAGAPPROVAL = 1 OR FLAGDISBURSEMENT = 1  
+  or (stage1Status = 'EXPIRED' AND cddInitiatedDateAndTime IS NULL)
+)
+select *
+from
+(
+  select 
+  a.Customer_Id,a.TSA_Opening_date,
+  c.OFSTANDARDACCOUNTID as TSA_Account_Number, c.OfblockAmount, 
+  a.TSA_Status,a.TSA_Balance,a.Solo_Stash_Balance,a.Group_Stash_Balance,a.Term_Deposit_Balance,a.Active_Term_Deposit_flag,a.Last_TSA_Credit_Date,a.Last_TSA_Debit_Date,
+  a.ARI_Flag,a.Active_Loan,a.Total_Loan_Outstanding,  case when b.customerId is not null then 1 else 0 end as Approved_Loans,
+  a.Pending_Loan_Applications,a.Hard_Reject_Loans_App,a.Soft_Reject_Loans_App,a.Cancelled_Loans_App, extract(date from a.Last_Login_Date) as Last_Login_Date,
+  a.Last_TSA_EOD_Balance_Date,a.Last_Group_Stash_Credit_Date,a.Group_Stash_Balance_Owner,a.Run_Date,a.Batch,a.Processing_Month,a.pending_loans_not_expired_not_exempt,a.expired_loans,
+  a.pending_loans_lastDt,a.expired_loans_lastDt,
+  CASE 
+    WHEN tsa_status = 'Active' and (Last_TSA_Credit_Date = date '1970-01-01' and Last_Group_Stash_Credit_Date is null)
+    and (TSA_Opening_date < date '2023-09-20')
+    and ( round(coalesce(TSA_Balance,0) + coalesce(Solo_Stash_Balance,0) + coalesce(Group_Stash_Balance,0) + coalesce(Term_Deposit_Balance,0),2) = 0 )
+    and (Active_Loan = 0) and (COALESCE(Pending_Loan_Applications,0) = 0)
+    and (Active_Term_Deposit_flag = 0)
+    and (ARI_Flag = 'N')
+    --and (Approved_Loans = 0)  THEN 'TYPE 1'
+    and b.customerId is null  THEN 'TYPE 1'
+
+
+    WHEN tsa_status = 'Active' and Last_TSA_EOD_Balance_Date is null and (TSA_Opening_date < date '2023-09-20')
+    and ( round(coalesce(TSA_Balance,0) + coalesce(Solo_Stash_Balance,0) + coalesce(Group_Stash_Balance,0) + coalesce(Term_Deposit_Balance,0),2) = 0 )
+    and (Active_Loan = 0) and (COALESCE(Pending_Loan_Applications,0) = 0)
+    and (Active_Term_Deposit_flag = 0)
+    and (ARI_Flag = 'N')
+    --and (Approved_Loans = 0)
+    and b.customerId is null  
+    and (date_trunc(TSA_Opening_date,day) = date_trunc(Last_Login_Date,day)) THEN 'TYPE 2'
+
+    
+    WHEN ( round(coalesce(TSA_Balance,0) + coalesce(Solo_Stash_Balance,0) + coalesce(Group_Stash_Balance,0) + coalesce(Term_Deposit_Balance,0),2) < 1 )
+    and (Active_Loan = 0) and (COALESCE(Pending_Loan_Applications,0) = 0)
+    and (Active_Term_Deposit_flag = 0)
+    and (Last_TSA_Credit_Date < date '2023-05-20' and Last_TSA_Debit_Date < date '2023-05-20' and coalesce(Last_Group_Stash_Credit_Date,date '1970-01-01') < date '2023-05-20')
+    and tsa_status = 'Active'
+    and (ARI_Flag = 'N')
+    --and (Approved_Loans = 0)
+    and b.customerId is null  
+    and TSA_Opening_date < date '2023-05-20' THEN 'TYPE 3'
+    ELSE 'NO ACTION'
+    END AS ACTION_TYPE
+  from w_tsa A
+  left join w_approved b
+  on cast(a.Customer_Id as int64) = b.customerId
+  left join core_raw.customer_accounts c
+  on c.OFCUSTOMERID = a.Customer_Id and c.CRINTERDESC = 'Transactional Savings Account Inv_R' and c.OFISCLOSED = 'N'
+  where
+  Run_Date = date '2023-12-13'
+)
